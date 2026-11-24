@@ -368,9 +368,10 @@ final class FrameUpscaler: @unchecked Sendable {
         let output = UncheckedSendable(encoded.output)
         let ran = UncheckedSendable(stage)
         let encodedTimes = times
-        return .gpu(work) { [weak self] holdMs in
+        let submittedWork = work
+        return .gpu(submittedWork) { [weak self] holdMs in
             guard let self else { return nil }
-            return self.complete(work, output: output.value, stage: ran.value, times: encodedTimes, holdMs: holdMs)
+            return self.complete(submittedWork, output: output.value, stage: ran.value, times: encodedTimes, holdMs: holdMs)
         }
     }
 
