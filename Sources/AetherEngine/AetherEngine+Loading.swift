@@ -761,8 +761,9 @@ extension AetherEngine {
     private func prepareRemoteHLSStandIn(originURL: URL,
                                          options: LoadOptions,
                                          expectedGeneration: UInt64) async throws -> URL? {
-        let mayNeedRelay = EngineTLS.serverTrustEvaluator != nil
-            && originURL.scheme?.lowercased() == "https"
+        let holdsClientCredential = EngineTLS.holdsClientCredential(for: originURL)
+        let mayNeedRelay = holdsClientCredential
+            || (EngineTLS.serverTrustEvaluator != nil && originURL.scheme?.lowercased() == "https")
         let tracks = options.isLive
             ? []
             : externalSubtitleRegistry
@@ -771,9 +772,14 @@ extension AetherEngine {
                 .map { RemoteHLSSubtitleProvider.Track(externalID: $0.key, source: $0.value) }
         // Nothing to stand in for, so the origin is never asked.
         guard !tracks.isEmpty || mayNeedRelay else { return nil }
-        let needsRelay = mayNeedRelay
-            ? await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
-            : false
+        let needsRelay: Bool
+        if holdsClientCredential {
+            needsRelay = true
+        } else if mayNeedRelay {
+            needsRelay = await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
+        } else {
+            needsRelay = false
+        }
         try checkLoadCurrent(expectedGeneration)
         guard !options.isLive || needsRelay else { return nil }
         guard !tracks.isEmpty || needsRelay else { return nil }

@@ -5640,7 +5640,8 @@ public final class AetherEngine: ObservableObject {
                     FLACStreamInfo.coreMediaMistimesFrames(UnsafePointer($0.pointee.codecpar), frameBlockSize: size)
                 } ?? false
             } ?? false
-            let useNativeAudio = Self.audioOnlyUsesAVPlayer(
+            let needsClientCredential = EngineTLS.holdsClientCredential(for: url)
+            let useNativeAudio = !needsClientCredential && Self.audioOnlyUsesAVPlayer(
                 codecID: audioCodecID, isCustomSource: isCustomSource,
                 flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: flacFramesMistimed,
                 flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE,
@@ -5648,7 +5649,7 @@ public final class AetherEngine: ObservableObject {
                 preferred: options.preferredDecodePath)
             // Named only when it decided the route (AVPlayer otherwise), so a host can tell its
             // preference arrived.
-            let hostAskedSoftware = !useNativeAudio && Self.audioOnlyUsesAVPlayer(
+            let hostAskedSoftware = !useNativeAudio && !needsClientCredential && Self.audioOnlyUsesAVPlayer(
                 codecID: audioCodecID, isCustomSource: isCustomSource,
                 flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: flacFramesMistimed,
                 flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE,
