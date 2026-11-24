@@ -86,6 +86,11 @@ extension AetherEngine {
         #if !targetEnvironment(simulator)
         guard #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *),
               let upscaler = host.frameUpscaler as? FrameUpscaler, let plan = host.upscalePlan else { return }
+        // A retired stage must not publish a frame for the replacement host's request.
+        let comparison = UpscaleComparisonControl()
+        comparison.split = upscaleComparison.split
+        upscaleComparison = comparison
+        upscaler.comparisonControl = comparison
         // Weak both ways: the host owns the stage, which owns this handler.
         upscaler.onEvent = { [weak self, weak host] event in
             Task { @MainActor in

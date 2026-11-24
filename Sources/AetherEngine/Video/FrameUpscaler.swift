@@ -123,6 +123,13 @@ final class FrameUpscaler: @unchecked Sendable {
     typealias MLSubmit = (VTLowLatencySuperResolutionScalerParameters, @escaping @Sendable (Error?) -> Void) -> Void
     private var _mlSubmitOverride: MLSubmit?
 
+    var comparisonControl: UpscaleComparisonControl? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _comparisonControl }
+        set { stateLock.lock(); _comparisonControl = newValue; stateLock.unlock() }
+    }
+    private var _comparisonControl: UpscaleComparisonControl?
+    private var comparisonCompositor: UpscaleComparisonCompositor?
+
     private let configuredInterval: Double
     private var frameInterval: Double
     /// The last `intervalWindow + 1` distinct PTS, in arrival order.
@@ -191,6 +198,7 @@ final class FrameUpscaler: @unchecked Sendable {
             return nil
         }
         self.gpu = gpu
+        self.comparisonCompositor = UpscaleComparisonCompositor(device: gpu.device)
         self.initialPlan = plan
         self.buildQueue = buildQueue
         self.scaler = plan.scaler
@@ -351,17 +359,40 @@ final class FrameUpscaler: @unchecked Sendable {
             recordFailure(error)
             return .passThrough
         }
-        guard let work = encoded.work else {
+        guard var work = encoded.work else {
             times.total = elapsedMs(since: start)
             recordSuccess(times, stage: stage)
             return .ready(encoded.output)
         }
+        appendComparison(original: input, enhanced: encoded.output, pts: pts, work: &work)
         let output = UncheckedSendable(encoded.output)
         let ran = UncheckedSendable(stage)
         let encodedTimes = times
         return .gpu(work) { [weak self] holdMs in
             guard let self else { return nil }
             return self.complete(work, output: output.value, stage: ran.value, times: encodedTimes, holdMs: holdMs)
+        }
+    }
+
+    private func appendComparison(original: CVPixelBuffer, enhanced: CVPixelBuffer, pts: CMTime, work: inout EncodedGPUWork) {
+        guard let control = comparisonControl, let request = control.request else { return }
+        guard let compositor = comparisonCompositor else {
+            control.failed(request, reason: "comparison Metal pipeline unavailable")
+            return
+        }
+        do {
+            let picture = Self.pictureRegion(of: original)
+            work = try compositor.encode(original: original, enhanced: enhanced, split: request.split,
+                sourceRegion: CGRect(x: picture.x, y: picture.y, width: picture.width, height: picture.height), into: work)
+            let source = CGSize(width: picture.width, height: picture.height)
+            let target = CGSize(width: CVPixelBufferGetWidth(enhanced), height: CVPixelBufferGetHeight(enhanced))
+            work.commandBuffer.addCompletedHandler { command in
+                if command.status == .completed { control.delivered(request, source: source, target: target, pts: pts.seconds) }
+            }
+        } catch {
+            if control.failed(request, reason: "comparison output unavailable: \(error)") {
+                EngineLog.emit("[Upscale] comparison unavailable: \(error)", category: .swPlayback)
+            }
         }
     }
 

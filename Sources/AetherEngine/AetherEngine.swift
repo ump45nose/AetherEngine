@@ -1306,6 +1306,11 @@ public final class AetherEngine: ObservableObject {
     /// cleared with the session.
     @Published public internal(set) var activeUpscale: UpscaleStatus?
 
+    /// Same decoded frame comparison, composed inside the active upscale stage.
+    public internal(set) var upscaleComparison = UpscaleComparisonControl()
+    public internal(set) var upscaleRoutePlanned = false
+    public internal(set) var upscaleUnavailableReason: String?
+
     /// What the picture processing (`LoadOptions.videoProcessing`, #957) is doing for the current session.
     /// Published on the first processed frame, not when the load decides the route, and again with
     /// `disabledReason` set if the processing switches itself off. nil when it is not running, and
@@ -6343,6 +6348,9 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit(line, category: .engine)
         }
         sourceUpscalePlan = upscaleDecision.plan
+        upscaleRoutePlanned = sourceUpscalePlan != nil
+        if case let .notTaken(reason) = upscaleDecision { upscaleUnavailableReason = reason.text }
+        else { upscaleUnavailableReason = nil }
         sourceSoftwareOnlyForUpscale = sourceUpscalePlan != nil && !useSoftwarePath
         if sourceUpscalePlan != nil { useSoftwarePath = true }
         // #957: the same place and the same reason as the upscale route. The two never both take a source:
@@ -9244,6 +9252,8 @@ public final class AetherEngine: ObservableObject {
         // against this one's rectangle for as long as it takes its own first frame to arrive.
         softwareDisplaySize = nil
         activeUpscale = nil
+        upscaleRoutePlanned = false
+        upscaleUnavailableReason = nil
         activeVideoProcessing = nil
         decodedVideoFormat = nil
         // #314: same detach on the software path, where the outgoing renderer's decode thread is what
