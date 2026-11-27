@@ -13,6 +13,17 @@ public enum SubtitleChannel: Sendable {
     case secondary
 }
 
+/// A primary sidecar pick finishes only when its payload can be displayed.
+public struct ExternalSubtitleSelectionReceipt: Sendable {
+    public enum Outcome: String, Sendable {
+        case selected, failed, superseded
+    }
+
+    public let sourceGeneration: Int
+    public let requestID: Int
+    public let outcome: Outcome
+}
+
 extension SubtitleForwardPrefetcher {
     /// #151: on the 6.60.0-atlas.1 device run, refusals fell from roughly 150 to 21, but every 429
     /// after the pump went quiet came from this best-effort reader reopening every 4 to 10 seconds.
@@ -1782,6 +1793,112 @@ extension AetherEngine {
         }
         startSidecarDecode(url: track.url, httpHeaders: track.httpHeaders, externalTrackID: id,
                            sourceStreamIndex: track.sourceStreamIndex)
+    }
+
+    /// Receipt-aware selection for hosts that need to distinguish registration from display.
+    /// Keep the previous track intact until text or bitmap data is ready to install.
+    public func selectExternalSubtitleWithReceipt(id: Int, sourceGeneration: Int,
+                                                  requestID: Int) async -> ExternalSubtitleSelectionReceipt {
+        externalSubtitleIntentGeneration &+= 1
+        hostExplicitSubtitleAction = true
+        let intent = externalSubtitleIntentGeneration
+        let generation = loadGeneration
+        func receipt(_ outcome: ExternalSubtitleSelectionReceipt.Outcome) -> ExternalSubtitleSelectionReceipt {
+            .init(sourceGeneration: sourceGeneration, requestID: requestID, outcome: outcome)
+        }
+        guard let track = externalSubtitleRegistry[id] else { return receipt(.failed) }
+        let headers = Self.resolvedSubtitleHeaders(for: track.url, explicit: track.httpHeaders,
+                                                   mediaURL: loadedURL, mediaHeaders: loadedOptions.httpHeaders)
+        let preserveASS = loadedOptions.preserveASSMarkup
+        externalSelectionReceiptRequest = (sourceGeneration, requestID)
+        isLoadingSubtitles = true
+        let task = Task { @MainActor in
+            @MainActor func current() -> Bool {
+                !Task.isCancelled && self.loadGeneration == generation &&
+                    self.externalSubtitleIntentGeneration == intent
+            }
+            defer {
+                if current() { self.isLoadingSubtitles = false }
+            }
+            do {
+                let decoded = try await SubtitleDecoder.decodeFile(
+                    url: track.url, httpHeaders: headers, preserveASSMarkup: preserveASS,
+                    sourceStreamIndex: track.sourceStreamIndex, preparationPolicy: track.preparationPolicy,
+                    keepsBitmapPackets: true, formatHint: track.formatHint)
+                guard current() else { return receipt(.superseded) }
+                let bitmapDecoder: EmbeddedSubtitleDecoder?
+                if let source = decoded.bitmapSource {
+                    // A demuxable bitmap file may still contain no decodable display sets.
+                    // Validate one displayable cue off the player thread before publishing success.
+                    let validation = BlockingWork.detached(priority: .userInitiated) {
+                        guard let decoder = source.makeDecoder() else { return false }
+                        for packet in source.packets {
+                            if Task.isCancelled { return false }
+                            if let event = Self.decodeStoredSubtitlePacket(packet, with: decoder),
+                               !event.cues.isEmpty { return true }
+                        }
+                        return false
+                    }
+                    let displayable = await withTaskCancellationHandler {
+                        await validation.value
+                    } onCancel: { validation.cancel() }
+                    guard current() else { return receipt(.superseded) }
+                    guard displayable,
+                          let decoder = source.makeDecoder(sourceIsPQ: self.sourceIsPQForBitmapSubtitles) else {
+                        return receipt(.failed)
+                    }
+                    bitmapDecoder = decoder
+                } else {
+                    guard !decoded.cues.isEmpty else { return receipt(.failed) }
+                    bitmapDecoder = nil
+                }
+                self.cancelSubtitleOCRWorker()
+                self.cancelSidecarTask()
+                self.clearSubtitleDrainTarget(channel: .primary, reason: .sidecarSelected)
+                self.liveSubtitleFetchTask?.cancel()
+                self.liveSubtitleFetchTask = nil
+                self.activeEmbeddedSubtitleStreamIndex = -1
+                self.pgsStaleArrivalGates[.primary]?.reset()
+                self.activeSubtitleTrackIndex = id
+                self.loadedSidecarURL = track.url
+                self.loadedSidecarHeaders = track.httpHeaders
+                self.isSubtitleActive = true
+                self.subtitleCues = decoded.cues
+                self.sidecarASSHeader = decoded.assHeader
+                if let source = decoded.bitmapSource {
+                    self.installSidecarBitmapSource(source, channel: .primary, preparedDecoder: bitmapDecoder)
+                    self.startSidecarOCRFillIfNeeded(externalTrackID: id, source: source)
+                }
+                return receipt(.selected)
+            } catch {
+                guard current() else { return receipt(.superseded) }
+                EngineLog.emit("[AetherEngine] external subtitle selection failed: id=\(id)", category: .engine)
+                return receipt(.failed)
+            }
+        }
+        externalSelectionReceiptTask = task
+        let result = await task.value
+        if externalSelectionReceiptRequest?.source == sourceGeneration &&
+            externalSelectionReceiptRequest?.id == requestID {
+            externalSelectionReceiptTask = nil
+            externalSelectionReceiptRequest = nil
+        }
+        return result
+    }
+
+    /// Cancel only the request that the host has superseded.
+    public func cancelExternalSubtitleSelection(sourceGeneration: Int, requestID: Int) {
+        guard externalSelectionReceiptRequest?.source == sourceGeneration,
+              externalSelectionReceiptRequest?.id == requestID else { return }
+        externalSubtitleIntentGeneration &+= 1
+    }
+
+    func invalidateExternalSelectionReceipt() {
+        guard externalSelectionReceiptRequest != nil else { return }
+        externalSelectionReceiptTask?.cancel()
+        externalSelectionReceiptTask = nil
+        externalSelectionReceiptRequest = nil
+        isLoadingSubtitles = false
     }
 
     /// Store lookup for the external backfill: test-hook override first, else the live session's stores.

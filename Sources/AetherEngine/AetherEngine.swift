@@ -2660,14 +2660,22 @@ public final class AetherEngine: ObservableObject {
     var loadGeneration: UInt64 = 0 {
         // AE#1061: a stop() or newer load releases a pick parked on the load it replaced at once, not
         // only when that load gets round to unwinding.
-        didSet { resumeLoadSettleWaiters() }
+        didSet {
+            invalidateExternalSelectionReceipt()
+            resumeLoadSettleWaiters()
+        }
     }
 
     /// Separates cache lifecycle callbacks from superseding sessions.
     var sessionCacheStatusToken: UInt64 = 0
     /// Bumped by every host subtitle selection or clear on either channel (#829): a
     /// `PreparedExternalSubtitle` from an older value is stale.
-    var externalSubtitleIntentGeneration: UInt64 = 0
+    var externalSubtitleIntentGeneration: UInt64 = 0 {
+        didSet { invalidateExternalSelectionReceipt() }
+    }
+    var externalSelectionReceiptTask: Task<ExternalSubtitleSelectionReceipt, Never>?
+    var externalSelectionReceiptRequest: (source: Int, id: Int)?
+
 
     /// Distinct across engine instances and refreshed whenever teardown invalidates preview work.
     public private(set) var scrubPreviewSourceGeneration = UUID()
